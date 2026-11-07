@@ -1,0 +1,26 @@
+---
+description: Componentes React do FinBack. Tailwind no mesmo arquivo e UI sem SQL.
+globs: src/**/*.tsx
+alwaysApply: false
+---
+
+# Interface
+
+Componente funcional, com o JSX e as classes Tailwind no mesmo arquivo. Sem arquivo CSS separado.
+
+A tela chama um hook. O hook chama `src/db/client`. Sem `SELECT`, `INSERT` ou nome de tabela no componente.
+
+Um arquivo por tela enquanto ela couber na leitura. Extraia um componente quando o mesmo bloco repetir ou o arquivo ficar difícil de ler.
+
+Dinheiro e data passam por helper em `src/lib/` quando esse helper existir. Não formate centavos direto no JSX.
+
+Textos visíveis em português.
+
+```tsx
+// ruim: SQL e estilo fora do componente
+const rows = await db.exec("SELECT * FROM banks");
+
+// bom: a tela só consome o hook
+const { banks } = useBanks();
+return <p className="text-sm text-zinc-600">{formatCents(bank.balanceCents)}</p>;
+```

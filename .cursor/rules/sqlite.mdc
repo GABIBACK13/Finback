@@ -1,0 +1,23 @@
+---
+description: SQLite WASM no worker. SQL, schema versionado e erros em português.
+globs: src/db/**/*
+alwaysApply: false
+---
+
+# Banco
+
+SQL e a validação que o `CHECK` não cobre ficam no worker. `src/db/client.ts` só faz `postMessage`.
+
+`PRAGMA foreign_keys = ON`. Versão em `schema_migrations`. Exclusão de banco, classe ou subclasse usada por lançamento é `ON DELETE RESTRICT`, com erro em português na resposta do RPC.
+
+Uma conexão. Sem abrir outro banco na mesma origem e sem cair para memória se o OPFS falhar.
+
+Comentário só quando a restrição do navegador não aparece no código.
+
+```ts
+// ruim
+// Executa o SQL
+
+// bom
+// SyncAccessHandle só existe em worker. A main thread não pode abrir o OPFS.
+```
