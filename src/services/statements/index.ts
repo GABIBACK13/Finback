@@ -3,7 +3,12 @@ import type { ParsedStatementRow, StatementDraft, StatementFormat, StatementStan
 export type { StatementFormat, StatementStandard }
 
 export const statementStandards: Record<StatementFormat, readonly StatementStandard[]> = {
-  csv: [{ id: 'sicredi', label: 'Padrão Sicredi' }],
+  csv: [
+    { id: 'sicredi', label: 'Padrão Sicredi' },
+    { id: 'minhas-financas-debito', label: 'Débitos Minhas Finanças' },
+    { id: 'minhas-financas-credito', label: 'Créditos Minhas Finanças' },
+    { id: 'minhas-financas-transferencia', label: 'Transferências Minhas Finanças' },
+  ],
   pdf: [],
   excel: [],
 }
@@ -67,6 +72,7 @@ export function draftsFromParsed(
       skipped: false,
       touched: false,
       typeNeedsChoice: row.typeNeedsChoice,
+      paid: true,
       notice,
     }
   })

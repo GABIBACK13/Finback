@@ -23,6 +23,7 @@ export type ParsedStatementRow = {
 
 export type StatementDraft = {
   key: string
+  bankId?: number
   occurredOn: string
   title: string
   description: string
@@ -44,7 +45,56 @@ export type StatementDraft = {
   skipped: boolean
   touched: boolean
   typeNeedsChoice: boolean
+  paid: boolean
   notice: string | null
+}
+
+export type MinhasFinancasRow = {
+  lineIndex: number
+  title: string
+  amountCents: number
+  occurredOn: string
+  notes: string
+  category: string
+  subcategory: string
+  card: string | null
+  account: string
+  destinationAccount: string | null
+  externalId: string
+  invalidAmount: boolean
+}
+
+export type MinhasFinancasCardInfo = {
+  name: string
+  defaultAccount: string | null
+}
+
+export type MinhasFinancasCategoryItem = {
+  key: string
+  category: string
+  subcategory: string
+}
+
+export type MinhasFinancasFile = {
+  defaultType: 'debit' | 'credit' | 'transfer'
+  rows: MinhasFinancasRow[]
+  accounts: string[]
+  cards: MinhasFinancasCardInfo[]
+  categories: MinhasFinancasCategoryItem[]
+}
+
+export type MappingSource = 'saved' | 'exact' | 'manual'
+
+export type MinhasFinancasMappingSources = {
+  accounts: Record<string, MappingSource>
+  cards: Record<string, MappingSource>
+  categories: Record<string, MappingSource>
+}
+
+export type MinhasFinancasMapping = {
+  accounts: Record<string, number | null>
+  cards: Record<string, number | null>
+  categories: Record<string, { classId: number | null; subclassId: number | null }>
 }
 
 export type SavedTitleMatch = {

@@ -22,3 +22,10 @@ No começo de uma sessão que continua o produto, ler `CONTEXT.md`. Ao fim de um
 ## Comentários
 
 Comentário explica decisão que o código não mostra. `// executa o SQL` não entra. O caso típico é o OPFS e o worker.
+
+## Planos e Suporte ao Cursor
+
+- `.cursor/plans/*.plan.md`: planos de implementação estruturados com frontmatter YAML (`name`, `overview`, `todos` com `id`, `content`, `status: pending|in_progress|completed`, `isProject`). Antes de executar uma funcionalidade complexa, consulte ou crie o plano respectivo.
+- `.cursor/rules/*.mdc`: regras contextuais ativadas por arquivo (`ui.mdc`, `sqlite.mdc`, `statements.mdc`, `plans.mdc`).
+- `.cursorignore` e `.gitignore`: ignoram arquivos pesados, dependências, locks e artefatos de banco para manter o contexto dos agentes enxuto e evitar vazamentos.
+- Handoff: os `todos` do plano ativo controlam a execução imediata; o progresso consolidado de produto é sincronizado em `CONTEXT.md`.

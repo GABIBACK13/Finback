@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createBank, deleteBank, listBanks, updateBank } from '../db/client.ts'
-import type { Bank } from '../db/types.ts'
+import type { Bank, BankInput, BankKind } from '../db/types.ts'
 import { useDb } from './useDb.ts'
 
-export type { Bank }
+export type { Bank, BankInput, BankKind }
 
 export function useBanks() {
   const { status } = useDb()
@@ -28,16 +28,17 @@ export function useBanks() {
   }, [status, reload])
 
   const create = useCallback(
-    async (name: string) => {
-      await createBank(name)
+    async (input: BankInput | string) => {
+      const created = await createBank(input)
       await reload()
+      return created
     },
     [reload],
   )
 
   const update = useCallback(
-    async (id: number, name: string) => {
-      await updateBank(id, name)
+    async (id: number, input: Partial<BankInput> | string) => {
+      await updateBank(id, input)
       await reload()
     },
     [reload],

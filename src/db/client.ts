@@ -1,5 +1,6 @@
 import type {
   Bank,
+  BankInput,
   ClassRecord,
   ClassScope,
   DashboardQuery,
@@ -7,6 +8,8 @@ import type {
   DescriptionSuggestion,
   ImportBatch,
   ImportChange,
+  ImportMappingInput,
+  ImportMappingRecord,
   ImportRequest,
   ImportRule,
   ImportRuleInput,
@@ -130,12 +133,14 @@ export function listBanks() {
   return call<Bank[]>('banks.list')
 }
 
-export function createBank(name: string) {
-  return call<Bank>('banks.create', { name })
+export function createBank(input: BankInput | string) {
+  const payload = typeof input === 'string' ? { name: input } : input
+  return call<Bank>('banks.create', payload)
 }
 
-export function updateBank(id: number, name: string) {
-  return call<Bank>('banks.update', { id, name })
+export function updateBank(id: number, input: Partial<BankInput> | string) {
+  const payload = typeof input === 'string' ? { id, name: input } : { id, ...input }
+  return call<Bank>('banks.update', payload)
 }
 
 export function deleteBank(id: number) {
@@ -204,6 +209,14 @@ export function listImportRules(bankId: number) {
 
 export function saveImportRule(input: ImportRuleInput) {
   return call<ImportRule>('importRules.save', input)
+}
+
+export function listImportMappings() {
+  return call<ImportMappingRecord[]>('importMappings.list')
+}
+
+export function saveImportMappings(mappings: ImportMappingInput[]) {
+  return call<null>('importMappings.save', mappings)
 }
 
 export function loadDashboard(query: DashboardQuery) {

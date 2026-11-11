@@ -1,0 +1,19 @@
+---
+description: Leitura e parsing de extratos bancários (CSV, etc.) e regras de sugestão/classificação. Sem SQL.
+globs: src/services/statements/**/*
+alwaysApply: false
+---
+
+# Serviços de Extrato e Classificação
+
+Serviços de parsing de extratos (CSV, etc.) e motor de classificação/inferência.
+
+## Diretrizes
+
+1. **Sem SQL**: É proibido executar SQL ou conectar ao banco dentro de `src/services/statements/`. O acesso ao banco é exclusivo de `src/db/` via worker.
+2. **Dados por Parâmetro**: Regras, categorias existentes e histórico do banco para inferência devem ser injetados via parâmetros ou consumidos por hooks em `src/hooks/`.
+3. **Moeda e Data**:
+   - Valores monetários são convertidos e manipulados em **centavos** (inteiro).
+   - Datas utilizam formato civil `YYYY-MM-DD`.
+4. **Funções Puras**: Mantenha os parsers e motores de sugestão como funções puras e determinísticas, testáveis sem depender de DOM ou banco.
+5. **Erros e Avisos**: Erros de formato e validação devem fornecer mensagens amigáveis em português.

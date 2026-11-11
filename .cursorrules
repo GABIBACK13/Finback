@@ -1,0 +1,10 @@
+# FinBack — Instruções para Cursor
+
+Consulte as diretrizes completas em `AGENTS.md`, o estado do produto em `CONTEXT.md` e as regras por arquivo em `.cursor/rules/*.mdc`.
+
+## Princípios Fundamentais
+- **Stack**: Vite, React, TypeScript, Tailwind, React Router.
+- **Banco de Dados**: SQLite WASM `@sqlite.org/sqlite-wasm` com OPFS `opfs-sahpool` exclusivamente no Web Worker (`src/db/`). Sem SQL na UI nem em serviços.
+- **Valores**: Dinheiro sempre em centavos inteiros (BRL). Datas em formato civil `YYYY-MM-DD`. Textos da interface em português.
+- **Planos**: Os planos de trabalho residem em `.cursor/plans/*.plan.md` com YAML frontmatter (`name`, `overview`, `todos`, `isProject`).
+- **Ignore**: Arquivos pesados, temporários e dependências são ignorados via `.cursorignore`.

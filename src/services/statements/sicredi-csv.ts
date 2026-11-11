@@ -32,10 +32,11 @@ function balanceLabel(raw: string): string {
 
 export function decodeStatement(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer)
-  const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
-  const firstLine = utf8.replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0]?.trim() ?? ''
-  if (firstLine === header) return utf8
-  return new TextDecoder('windows-1252').decode(bytes)
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '')
+  } catch {
+    return new TextDecoder('windows-1252').decode(bytes)
+  }
 }
 
 export function parseSicrediCsv(text: string): ParsedStatementRow[] {

@@ -4,6 +4,7 @@ import { Columns, DeltaBars, DeltaColumns, Donut, Lines, PairBars, RankBars, Sta
 import { useBanks } from '../hooks/useBanks.ts'
 import { useDashboard } from '../hooks/useDashboard.ts'
 import type { ClassAmount, DashboardSnapshot, FlowMonth } from '../db/types.ts'
+import { bankDisplayName } from '../lib/banks.ts'
 import { formatDate, formatDay, formatMonth, periodBounds, todayISO, type PeriodPreset } from '../lib/dates.ts'
 import { formatCents } from '../lib/money.ts'
 import { chartColors, colorMap } from '../lib/palette.ts'
@@ -496,9 +497,15 @@ function ClassesTab({ snapshot }: { snapshot: DashboardSnapshot }) {
 
 function AccountsTab({ snapshot, bankId }: { snapshot: DashboardSnapshot; bankId: number | null }) {
   const selected = bankId === null ? null : (snapshot.banks.find((bank) => bank.bankId === bankId) ?? null)
-  const byBalance = [...snapshot.banks].sort((a, b) => b.balanceCents - a.balanceCents || a.bankName.localeCompare(b.bankName, 'pt-BR'))
+  const bankLabel = (b: { bankName: string; kind?: import('../db/types.ts').BankKind; parentBankName?: string | null }) =>
+    bankDisplayName({ name: b.bankName, kind: b.kind, parentBankName: b.parentBankName })
+  const byBalance = [...snapshot.banks].sort(
+    (a, b) => b.balanceCents - a.balanceCents || bankLabel(a).localeCompare(bankLabel(b), 'pt-BR'),
+  )
   const byFlow = [...snapshot.banks].sort(
-    (a, b) => b.debitCents + b.transferOutCents - (a.debitCents + a.transferOutCents) || a.bankName.localeCompare(b.bankName, 'pt-BR'),
+    (a, b) =>
+      b.debitCents + b.transferOutCents - (a.debitCents + a.transferOutCents) ||
+      bankLabel(a).localeCompare(bankLabel(b), 'pt-BR'),
   )
   const incoming = snapshot.transferPeers.filter((peer) => peer.direction === 'in')
   const outgoing = snapshot.transferPeers.filter((peer) => peer.direction === 'out')
@@ -508,7 +515,7 @@ function AccountsTab({ snapshot, bankId }: { snapshot: DashboardSnapshot; bankId
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       {selected && (
-        <Panel title={selected.bankName} caption="Saldo de hoje e o que passou por esta conta no período.">
+        <Panel title={bankLabel(selected)} caption="Saldo de hoje e o que passou por esta conta no período.">
           <ul className="space-y-2 text-sm">
             <li className="flex justify-between gap-3"><span className="text-zinc-600">Saldo atual</span><span className={toneOf(selected.balanceCents)}>{formatCents(selected.balanceCents)}</span></li>
             <li className="flex justify-between gap-3"><span className="text-zinc-600">Entradas</span><span className="text-emerald-700">{formatCents(selected.creditCents)}</span></li>
@@ -524,7 +531,7 @@ function AccountsTab({ snapshot, bankId }: { snapshot: DashboardSnapshot; bankId
             {byBalance.length === 0 ? (
               <EmptyNote />
             ) : (
-              <DeltaBars format={formatCents} rows={byBalance.map((bank) => ({ label: bank.bankName, value: bank.balanceCents }))} />
+              <DeltaBars format={formatCents} rows={byBalance.map((bank) => ({ label: bankLabel(bank), value: bank.balanceCents }))} />
             )}
           </Panel>
           <Panel title="Variação no período" caption="O que entrou na conta menos o que saiu, com transferência.">
@@ -534,7 +541,7 @@ function AccountsTab({ snapshot, bankId }: { snapshot: DashboardSnapshot; bankId
               <DeltaBars
                 format={formatCents}
                 rows={byFlow.map((bank) => ({
-                  label: bank.bankName,
+                  label: bankLabel(bank),
                   value: bank.creditCents + bank.transferInCents - bank.debitCents - bank.transferOutCents,
                 }))}
               />
@@ -551,7 +558,7 @@ function AccountsTab({ snapshot, bankId }: { snapshot: DashboardSnapshot; bankId
                 leftColor={chartColors.credit}
                 rightColor={chartColors.debit}
                 rows={byFlow.map((bank) => ({
-                  label: bank.bankName,
+                  label: bankLabel(bank),
                   left: bank.creditCents + bank.transferInCents,
                   right: bank.debitCents + bank.transferOutCents,
                 }))}
@@ -631,7 +638,8 @@ export default function HomePage() {
   const bounds = periodBounds(preset)
   const activeBankId = bankId !== null && banksLoaded && !banks.some((bank) => bank.id === bankId) ? null : bankId
   const { snapshot, error, loaded, pending } = useDashboard(activeBankId, bounds.from, bounds.to)
-  const bankName = banks.find((bank) => bank.id === activeBankId)?.name ?? null
+  const selectedBank = banks.find((bank) => bank.id === activeBankId) ?? null
+  const bankName = selectedBank ? bankDisplayName(selectedBank) : null
 
   return (
     <section className="space-y-6">
@@ -662,7 +670,7 @@ export default function HomePage() {
               <option value="">Todos os bancos</option>
               {banks.map((bank) => (
                 <option key={bank.id} value={bank.id}>
-                  {bank.name}
+                  {bankDisplayName(bank)}
                 </option>
               ))}
             </select>

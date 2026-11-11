@@ -1,0 +1,39 @@
+---
+description: Padrão, estrutura e ciclo de vida de planos de implementação (.cursor/plans/*.plan.md) no Cursor.
+globs: .cursor/plans/**/*.plan.md
+alwaysApply: false
+---
+
+# Planos de Implementação (Cursor Plans)
+
+Regras para criação, atualização e manutenção de planos no FinBack.
+
+## Estrutura Obrigatória
+
+Todo arquivo em `.cursor/plans/*.plan.md` deve conter frontmatter YAML no formato suportado pelo Cursor:
+
+```yaml
+---
+name: Nome da Funcionalidade ou Etapa
+overview: Breve resumo descritivo do objetivo do plano
+todos:
+  - id: identificador-tarefa-1
+    content: Descrição concisa e orientada à ação da tarefa
+    status: pending
+  - id: identificador-tarefa-2
+    content: Descrição concisa e orientada à ação da tarefa
+    status: in_progress
+isProject: false
+---
+```
+
+## Status Permitidos para `todos`
+- `pending`: tarefa pendente.
+- `in_progress`: tarefa em execução atual.
+- `completed`: tarefa concluída e verificada.
+
+## Diretrizes de Conteúdo
+1. **Idioma**: Todo o plano deve ser redigido em português do Brasil.
+2. **Respeito à Arquitetura**: O plano não deve reabrir decisões estruturais definidas em `AGENTS.md` e `CONTEXT.md` (SPA local, SQLite WASM no worker, sem SQL na UI, centavos BRL, sem fallback em memória).
+3. **Links e Arquivos**: Utilize links markdown relativos para arquivos do repositório (ex.: `[AGENTS.md](AGENTS.md)`, [`src/components/ImportPage.tsx`](src/components/ImportPage.tsx)).
+4. **Sincronização com `CONTEXT.md`**: O plano gerencia as tarefas táticas (`todos`). Ao concluir etapas significativas (mudança de schema, persistência ou tela), atualize o `CONTEXT.md` com o que funciona e o próximo passo macro.

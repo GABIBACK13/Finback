@@ -9,12 +9,16 @@ import migrateV3Sql from './migrate-v3.sql?raw'
 import migrateV4Sql from './migrate-v4.sql?raw'
 import migrateV5Sql from './migrate-v5.sql?raw'
 import migrateV6Sql from './migrate-v6.sql?raw'
+import migrateV7Sql from './migrate-v7.sql?raw'
+import migrateV8Sql from './migrate-v8.sql?raw'
 import schemaSql from './schema.sql?raw'
 import { daySpan, eachDay, eachMonth } from '../lib/dates.ts'
 import { descriptionScore, foldText } from '../lib/text.ts'
 import type {
   BalancePoint,
   Bank,
+  BankInput,
+  BankKind,
   BankPeriod,
   ClassAmount,
   ClassRecord,
@@ -27,6 +31,8 @@ import type {
   ImportBatch,
   ImportChange,
   ImportChangeAction,
+  ImportMappingKind,
+  ImportMappingRecord,
   ImportMatchKind,
   ImportRequest,
   ImportRule,
@@ -73,7 +79,8 @@ const transactionSelect = `
     t.description,
     t.notes,
     t.amount_cents,
-    t.occurred_on
+    t.occurred_on,
+    t.paid
   FROM transactions AS t
   JOIN banks AS source ON source.id = t.bank_id
   LEFT JOIN banks AS destination ON destination.id = t.destination_bank_id
@@ -166,41 +173,162 @@ function uniqueOr(error: unknown, message: string): never {
   throw error
 }
 
+function readBankInput(payload: unknown): BankInput {
+  if (typeof payload === 'string') return { name: payload.trim(), kind: 'bank' }
+  if (!isRecord(payload)) throw new Error('Não foi possível salvar o banco.')
+  const name = readName(payload)
+  const kind: BankKind = payload.kind === 'card' ? 'card' : 'bank'
+  const parentBankId =
+    payload.parentBankId === null || payload.parentBankId === undefined
+      ? null
+      : optionalForeignId(payload.parentBankId)
+  let closingDay: number | null = null
+  if (payload.closingDay !== null && payload.closingDay !== undefined) {
+    if (
+      typeof payload.closingDay !== 'number' ||
+      !Number.isInteger(payload.closingDay) ||
+      payload.closingDay < 1 ||
+      payload.closingDay > 31
+    ) {
+      throw new Error('Informe o dia de fechamento entre 1 e 31.')
+    }
+    closingDay = payload.closingDay
+  }
+  let limitCents: number | null = null
+  if (payload.limitCents !== null && payload.limitCents !== undefined) {
+    if (
+      typeof payload.limitCents !== 'number' ||
+      !Number.isInteger(payload.limitCents) ||
+      payload.limitCents < 0
+    ) {
+      throw new Error('Informe um limite válido.')
+    }
+    limitCents = payload.limitCents
+  }
+  return { name, kind, parentBankId, closingDay, limitCents }
+}
+
 function listBanks(): Bank[] {
   const rows = database().selectObjects(`
     SELECT
       b.id,
       b.name,
-      COALESCE((
-        SELECT SUM(
-          CASE
-            WHEN t.type = 'credit' AND t.bank_id = b.id THEN t.amount_cents
-            WHEN t.type = 'debit' AND t.bank_id = b.id THEN -t.amount_cents
-            WHEN t.type = 'transfer' AND t.bank_id = b.id THEN -t.amount_cents
-            WHEN t.type = 'transfer' AND t.destination_bank_id = b.id THEN t.amount_cents
-            ELSE 0
-          END
-        )
-        FROM transactions AS t
-        WHERE t.bank_id = b.id OR t.destination_bank_id = b.id
-      ), 0) AS balance_cents
+      b.kind,
+      b.parent_bank_id,
+      parent.name AS parent_bank_name,
+      b.closing_day,
+      b.limit_cents,
+      CASE
+        WHEN b.kind = 'card' THEN 0
+        ELSE COALESCE((
+          SELECT SUM(
+            CASE
+              WHEN t.type = 'credit' AND t.bank_id = b.id THEN t.amount_cents
+              WHEN t.type = 'debit' AND t.bank_id = b.id THEN -t.amount_cents
+              WHEN t.type = 'transfer' AND t.bank_id = b.id AND t.destination_bank_id NOT IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id) THEN -t.amount_cents
+              WHEN t.type = 'transfer' AND t.destination_bank_id = b.id AND t.bank_id NOT IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id) THEN t.amount_cents
+              WHEN t.type = 'credit' AND t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id) THEN t.amount_cents
+              WHEN t.type = 'debit' AND t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id) THEN -t.amount_cents
+              WHEN t.type = 'transfer' AND t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id) AND t.destination_bank_id <> b.id THEN -t.amount_cents
+              WHEN t.type = 'transfer' AND t.destination_bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id) AND t.bank_id <> b.id THEN t.amount_cents
+              ELSE 0
+            END
+          )
+          FROM transactions AS t
+          WHERE (
+            t.bank_id = b.id
+            OR t.destination_bank_id = b.id
+            OR t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id)
+            OR t.destination_bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id)
+          )
+          AND t.paid = 1
+        ), 0)
+      END AS balance_cents,
+      CASE
+        WHEN b.kind = 'card' THEN
+          COALESCE((
+            SELECT SUM(
+              CASE
+                WHEN t.type = 'debit' THEN t.amount_cents
+                WHEN t.type = 'credit' THEN -t.amount_cents
+                ELSE 0
+              END
+            )
+            FROM transactions AS t
+            WHERE t.bank_id = b.id
+              AND t.paid = 0
+          ), 0)
+        ELSE NULL
+      END AS used_limit_cents
     FROM banks AS b
+    LEFT JOIN banks AS parent ON parent.id = b.parent_bank_id
     ORDER BY b.name COLLATE NOCASE, b.id
   `)
-  return rows.map((row) => ({
-    id: asNumber(row.id),
-    name: text(row.name),
-    balanceCents: asNumber(row.balance_cents),
-  }))
+  return rows.map((row) => {
+    const kind: BankKind = row.kind === 'card' ? 'card' : 'bank'
+    const limitCents = optionalNumber(row.limit_cents)
+    const usedLimitCents = kind === 'card' ? asNumber(row.used_limit_cents) : null
+    const availableLimitCents =
+      kind === 'card' && limitCents !== null ? limitCents - (usedLimitCents ?? 0) : null
+    return {
+      id: asNumber(row.id),
+      name: text(row.name),
+      kind,
+      parentBankId: optionalNumber(row.parent_bank_id),
+      parentBankName: optionalText(row.parent_bank_name),
+      closingDay: optionalNumber(row.closing_day),
+      limitCents,
+      usedLimitCents,
+      availableLimitCents,
+      balanceCents: asNumber(row.balance_cents),
+    }
+  })
 }
 
 function createBank(payload: unknown): Bank {
-  const name = readName(payload)
+  const input = readBankInput(payload)
+  const kind = input.kind ?? 'bank'
+  if (kind === 'bank') {
+    if (input.parentBankId !== null && input.parentBankId !== undefined) {
+      throw new Error('Uma conta comum não pode ter banco pai.')
+    }
+    if (input.closingDay !== null && input.closingDay !== undefined) {
+      throw new Error('Uma conta comum não tem dia de fechamento.')
+    }
+    if (input.limitCents !== null && input.limitCents !== undefined) {
+      throw new Error('Uma conta comum não tem limite.')
+    }
+  } else {
+    if (!input.parentBankId) {
+      throw new Error('O cartão tem de ser vinculado a uma conta.')
+    }
+    const parent = database().selectObject('SELECT id, kind FROM banks WHERE id = ?', [input.parentBankId])
+    if (!parent || parent.kind !== 'bank') {
+      throw new Error('O cartão tem de ser vinculado a uma conta.')
+    }
+    if (input.closingDay === null) {
+      throw new Error('Informe o dia de fechamento entre 1 e 31.')
+    }
+    if (input.limitCents === null) {
+      throw new Error('Informe um limite válido.')
+    }
+  }
   const stamp = now()
   try {
     database().exec({
-      sql: 'INSERT INTO banks (name, created_at, updated_at) VALUES (?, ?, ?)',
-      bind: [name, stamp, stamp],
+      sql: `
+        INSERT INTO banks (name, kind, parent_bank_id, closing_day, limit_cents, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      bind: [
+        input.name,
+        kind,
+        kind === 'card' ? input.parentBankId : null,
+        kind === 'card' ? input.closingDay : null,
+        kind === 'card' ? input.limitCents : null,
+        stamp,
+        stamp,
+      ],
     })
   } catch (error) {
     uniqueOr(error, 'Já existe um banco com esse nome.')
@@ -213,15 +341,52 @@ function createBank(payload: unknown): Bank {
 
 function updateBank(payload: unknown): Bank {
   const id = readId(payload)
-  const name = readName(payload)
-  if (!exists('SELECT id FROM banks WHERE id = ?', [id])) throw new Error('Banco não encontrado.')
-  try {
-    database().exec({
-      sql: 'UPDATE banks SET name = ?, updated_at = ? WHERE id = ?',
-      bind: [name, now(), id],
-    })
-  } catch (error) {
-    uniqueOr(error, 'Já existe um banco com esse nome.')
+  const existing = database().selectObject('SELECT id, kind FROM banks WHERE id = ?', [id])
+  if (!existing) throw new Error('Banco não encontrado.')
+  const existingKind: BankKind = existing.kind === 'card' ? 'card' : 'bank'
+  const input = readBankInput(payload)
+  if (input.kind && input.kind !== existingKind) {
+    throw new Error('O tipo não muda depois de criar.')
+  }
+  if (existingKind === 'bank') {
+    try {
+      database().exec({
+        sql: 'UPDATE banks SET name = ?, updated_at = ? WHERE id = ?',
+        bind: [input.name, now(), id],
+      })
+    } catch (error) {
+      uniqueOr(error, 'Já existe um banco com esse nome.')
+    }
+  } else {
+    if (!input.parentBankId || input.parentBankId === id) {
+      throw new Error('O cartão tem de ser vinculado a uma conta.')
+    }
+    const parent = database().selectObject('SELECT id, kind FROM banks WHERE id = ?', [input.parentBankId])
+    if (!parent || parent.kind !== 'bank') {
+      throw new Error('O cartão tem de ser vinculado a uma conta.')
+    }
+    if (input.closingDay === null) {
+      throw new Error('Informe o dia de fechamento entre 1 e 31.')
+    }
+    if (input.limitCents === null) {
+      throw new Error('Informe um limite válido.')
+    }
+    try {
+      database().exec({
+        sql: `
+          UPDATE banks SET
+            name = ?,
+            parent_bank_id = ?,
+            closing_day = ?,
+            limit_cents = ?,
+            updated_at = ?
+          WHERE id = ?
+        `,
+        bind: [input.name, input.parentBankId, input.closingDay, input.limitCents, now(), id],
+      })
+    } catch (error) {
+      uniqueOr(error, 'Já existe um banco com esse nome.')
+    }
   }
   const updated = listBanks().find((bank) => bank.id === id)
   if (!updated) throw new Error('Banco não encontrado.')
@@ -231,6 +396,8 @@ function updateBank(payload: unknown): Bank {
 function deleteBank(payload: unknown): void {
   const id = readId(payload)
   if (!exists('SELECT id FROM banks WHERE id = ?', [id])) throw new Error('Banco não encontrado.')
+  const hasCards = countOf('SELECT COUNT(*) FROM banks WHERE parent_bank_id = ?', [id])
+  if (hasCards > 0) throw new Error('Este banco ainda tem um cartão.')
   const used = countOf(
     'SELECT COUNT(*) FROM transactions WHERE bank_id = ? OR destination_bank_id = ? OR external_bank_id = ?',
     [id, id, id],
@@ -452,6 +619,7 @@ function mapTransaction(row: Record<string, SqlValue>, parts: PartRecord[]): Tra
     notes: optionalText(row.notes),
     amountCents: asNumber(row.amount_cents),
     occurredOn: text(row.occurred_on),
+    paid: asNumber(row.paid) === 1,
     parts,
   }
 }
@@ -497,6 +665,8 @@ function saveTransaction(payload: unknown): TransactionRecord {
   const notes = blankToNull(payload.notes)
   const amountCents = payload.amountCents
   const occurredOn = payload.occurredOn
+  const paid = payload.paid === undefined || payload.paid === null ? true : Boolean(payload.paid)
+  const paidInt = paid ? 1 : 0
   const id = payload.id === null || payload.id === undefined ? null : optionalForeignId(payload.id)
   const parts = readParts(payload.parts, amountCents)
 
@@ -505,7 +675,7 @@ function saveTransaction(payload: unknown): TransactionRecord {
   assertParts(parts)
 
   const stamp = now()
-  const bind = [type, bankId, destinationBankId, title, description, notes, amountCents, occurredOn, stamp]
+  const bind = [type, bankId, destinationBankId, title, description, notes, amountCents, occurredOn, paidInt, stamp]
 
   let savedId = id ?? 0
   database().transaction(() => {
@@ -514,8 +684,8 @@ function saveTransaction(payload: unknown): TransactionRecord {
         sql: `
           INSERT INTO transactions (
             type, bank_id, destination_bank_id, external_id,
-            title, description, notes, amount_cents, occurred_on, created_at, updated_at
-          ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+            title, description, notes, amount_cents, occurred_on, paid, created_at, updated_at
+          ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         bind: [...bind, stamp],
       })
@@ -532,6 +702,7 @@ function saveTransaction(payload: unknown): TransactionRecord {
             notes = ?,
             amount_cents = ?,
             occurred_on = ?,
+            paid = ?,
             updated_at = ?
           WHERE id = ?
         `,
@@ -613,11 +784,18 @@ function importTransactions(payload: unknown): number {
   assertBank(request.bankId, null)
   database().transaction(() => {
     const batchStamp = now()
-    database().exec({
-      sql: 'INSERT INTO import_batches (bank_id, created_at) VALUES (?, ?)',
-      bind: [request.bankId, batchStamp],
-    })
-    const batchId = asNumber(database().selectValue('SELECT last_insert_rowid()') ?? 0)
+    const batchByBank = new Map<number, number>()
+    const batchFor = (targetBankId: number): number => {
+      const existing = batchByBank.get(targetBankId)
+      if (existing !== undefined) return existing
+      database().exec({
+        sql: 'INSERT INTO import_batches (bank_id, created_at) VALUES (?, ?)',
+        bind: [targetBankId, batchStamp],
+      })
+      const createdId = asNumber(database().selectValue('SELECT last_insert_rowid()') ?? 0)
+      batchByBank.set(targetBankId, createdId)
+      return createdId
+    }
     for (const row of request.rows) {
       if (!isTransactionType(row.type)) throw new Error('Escolha o tipo do lançamento.')
       if (typeof row.externalId !== 'string' || !row.externalId.trim()) {
@@ -649,14 +827,16 @@ function importTransactions(payload: unknown): number {
       if (externalBankId !== null) assertBank(externalBankId, null)
       const parts = readParts(row.parts, row.amountCents)
       assertParts(parts)
+      const batchId = batchFor(ownerBankId)
       const stamp = now()
       const title = row.title.trim()
+      const paid = row.paid === undefined || row.paid === null ? 1 : (row.paid ? 1 : 0)
       database().exec({
         sql: `
           INSERT INTO transactions (
             type, bank_id, destination_bank_id, external_id, external_bank_id,
-            title, description, notes, amount_cents, occurred_on, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            title, description, notes, amount_cents, occurred_on, paid, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         bind: [
           row.type,
@@ -669,6 +849,7 @@ function importTransactions(payload: unknown): number {
           blankToNull(row.notes),
           row.amountCents,
           row.occurredOn,
+          paid,
           stamp,
           stamp,
         ],
@@ -793,7 +974,18 @@ function dateClause(from: string | null, to: string | null): { sql: string; bind
 
 function bankTouch(bankId: number | null): { sql: string; bind: SqlBind[] } {
   if (bankId === null) return { sql: '', bind: [] }
-  return { sql: 't.bank_id = ? OR t.destination_bank_id = ?', bind: [bankId, bankId] }
+  return {
+    sql: '(t.bank_id = ? OR t.destination_bank_id = ? OR (t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.paid = 1))',
+    bind: [bankId, bankId, bankId],
+  }
+}
+
+function bankSource(bankId: number | null): { sql: string; bind: SqlBind[] } {
+  if (bankId === null) return { sql: '', bind: [] }
+  return {
+    sql: '(t.bank_id = ? OR (t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.paid = 1))',
+    bind: [bankId, bankId],
+  }
 }
 
 function readDashboardQuery(payload: unknown): DashboardQuery {
@@ -847,15 +1039,33 @@ function flowSums(bankId: number | null): { sql: string; bind: SqlBind[] } {
   }
   return {
     sql: `
-      SUM(CASE WHEN t.type = 'credit' AND t.bank_id = ? THEN t.amount_cents ELSE 0 END) AS credit_cents,
-      SUM(CASE WHEN t.type = 'debit' AND t.bank_id = ? THEN t.amount_cents ELSE 0 END) AS debit_cents,
-      SUM(CASE WHEN t.type = 'transfer' AND t.destination_bank_id = ? THEN t.amount_cents ELSE 0 END) AS transfer_in_cents,
-      SUM(CASE WHEN t.type = 'transfer' AND t.bank_id = ? THEN t.amount_cents ELSE 0 END) AS transfer_out_cents,
+      SUM(CASE
+        WHEN t.type = 'credit' AND (t.bank_id = ? OR (t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.paid = 1)) THEN t.amount_cents
+        ELSE 0
+      END) AS credit_cents,
+      SUM(CASE
+        WHEN t.type = 'debit' AND (t.bank_id = ? OR (t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.paid = 1)) THEN t.amount_cents
+        ELSE 0
+      END) AS debit_cents,
+      SUM(CASE
+        WHEN t.type = 'transfer' AND t.destination_bank_id = ? AND t.bank_id NOT IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) THEN t.amount_cents
+        ELSE 0
+      END) AS transfer_in_cents,
+      SUM(CASE
+        WHEN t.type = 'transfer' AND t.bank_id = ? AND t.destination_bank_id NOT IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) THEN t.amount_cents
+        ELSE 0
+      END) AS transfer_out_cents,
       SUM(CASE WHEN t.type = 'demonstrative' AND t.bank_id = ? THEN t.amount_cents ELSE 0 END) AS demonstrative_cents,
-      SUM(CASE WHEN t.type = 'credit' AND t.bank_id = ? THEN 1 ELSE 0 END) AS credit_count,
-      SUM(CASE WHEN t.type = 'debit' AND t.bank_id = ? THEN 1 ELSE 0 END) AS debit_count
+      SUM(CASE
+        WHEN t.type = 'credit' AND (t.bank_id = ? OR (t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.paid = 1)) THEN 1
+        ELSE 0
+      END) AS credit_count,
+      SUM(CASE
+        WHEN t.type = 'debit' AND (t.bank_id = ? OR (t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.paid = 1)) THEN 1
+        ELSE 0
+      END) AS debit_count
     `,
-    bind: [bankId, bankId, bankId, bankId, bankId, bankId, bankId],
+    bind: [bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId],
   }
 }
 
@@ -874,7 +1084,7 @@ function mapFlow(bucket: string, row: Record<string, SqlValue>): FlowMonth {
 
 function groupedFlows(bankId: number | null, from: string | null, to: string | null, grain: 'month' | 'day'): FlowMonth[] {
   const sums = flowSums(bankId)
-  const where = whereAnd([bankTouch(bankId), dateClause(from, to)])
+  const where = whereAnd([bankTouch(bankId), dateClause(from, to), { sql: 't.paid = 1', bind: [] }])
   const bucket = grain === 'month' ? "substr(t.occurred_on, 1, 7)" : 't.occurred_on'
   const rows = database().selectObjects(
     `
@@ -905,33 +1115,39 @@ function openingBalance(bankId: number | null, from: string | null): number {
           ), 0)
           FROM transactions
           WHERE occurred_on < ?
+            AND paid = 1
         `,
         [from],
       ) ?? 0,
     )
   }
+  const bank = database().selectObject('SELECT kind FROM banks WHERE id = ?', [bankId])
+  if (bank?.kind === 'card') return 0
   return metric(
     database().selectValue(
       `
         SELECT COALESCE(SUM(
           CASE
-            WHEN type = 'credit' AND bank_id = ? THEN amount_cents
-            WHEN type = 'debit' AND bank_id = ? THEN -amount_cents
-            WHEN type = 'transfer' AND bank_id = ? THEN -amount_cents
-            WHEN type = 'transfer' AND destination_bank_id = ? THEN amount_cents
+            WHEN t.type = 'credit' AND (t.bank_id = ? OR t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?)) THEN t.amount_cents
+            WHEN t.type = 'debit' AND (t.bank_id = ? OR t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?)) THEN -t.amount_cents
+            WHEN t.type = 'transfer' AND t.bank_id = ? AND t.destination_bank_id NOT IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) THEN -t.amount_cents
+            WHEN t.type = 'transfer' AND t.destination_bank_id = ? AND t.bank_id NOT IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) THEN t.amount_cents
+            WHEN t.type = 'transfer' AND t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.destination_bank_id <> ? THEN -t.amount_cents
+            WHEN t.type = 'transfer' AND t.destination_bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = ?) AND t.bank_id <> ? THEN t.amount_cents
             ELSE 0
           END
         ), 0)
-        FROM transactions
+        FROM transactions AS t
         WHERE occurred_on < ?
+          AND paid = 1
       `,
-      [bankId, bankId, bankId, bankId, from],
+      [bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, bankId, from],
     ) ?? 0,
   )
 }
 
 function activityRange(bankId: number | null): { from: string; to: string } | null {
-  const where = whereAnd([bankTouch(bankId)])
+  const where = whereAnd([bankTouch(bankId), { sql: 't.paid = 1', bind: [] }])
   const row = database().selectObject(
     `SELECT MIN(t.occurred_on) AS min_on, MAX(t.occurred_on) AS max_on FROM transactions AS t ${where.sql}`,
     where.bind,
@@ -941,13 +1157,8 @@ function activityRange(bankId: number | null): { from: string; to: string } | nu
 }
 
 function classAmounts(type: TransactionType, bankId: number | null, from: string | null, to: string | null): ClassAmount[] {
-  const bank =
-    bankId === null
-      ? { sql: '', bind: [] as SqlBind[] }
-      : type === 'transfer'
-        ? bankTouch(bankId)
-        : { sql: 't.bank_id = ?', bind: [bankId] as SqlBind[] }
-  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to)])
+  const bank = type === 'transfer' ? bankTouch(bankId) : bankSource(bankId)
+  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to), { sql: 't.paid = 1', bind: [] }])
   return database()
     .selectObjects(
       `
@@ -977,8 +1188,8 @@ function subclassAmounts(
   from: string | null,
   to: string | null,
 ): SubclassAmount[] {
-  const bank = bankId === null ? { sql: '', bind: [] as SqlBind[] } : { sql: 't.bank_id = ?', bind: [bankId] as SqlBind[] }
-  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to)])
+  const bank = bankSource(bankId)
+  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to), { sql: 't.paid = 1', bind: [] }])
   return database()
     .selectObjects(
       `
@@ -1009,8 +1220,8 @@ function titleAmounts(
   from: string | null,
   to: string | null,
 ): TitleAmount[] {
-  const bank = bankId === null ? { sql: '', bind: [] as SqlBind[] } : { sql: 't.bank_id = ?', bind: [bankId] as SqlBind[] }
-  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to)])
+  const bank = bankSource(bankId)
+  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to), { sql: 't.paid = 1', bind: [] }])
   return database()
     .selectObjects(
       `
@@ -1036,8 +1247,8 @@ function largestMovement(
   from: string | null,
   to: string | null,
 ): LargestMovement | null {
-  const bank = bankId === null ? { sql: '', bind: [] as SqlBind[] } : { sql: 't.bank_id = ?', bind: [bankId] as SqlBind[] }
-  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to)])
+  const bank = bankSource(bankId)
+  const where = whereAnd([{ sql: 't.type = ?', bind: [type] }, bank, dateClause(from, to), { sql: 't.paid = 1', bind: [] }])
   const row = database().selectObject(
     `
       SELECT t.title AS title, t.amount_cents AS amount_cents, t.occurred_on AS occurred_on
@@ -1057,33 +1268,42 @@ function largestMovement(
 }
 
 function unclassifiedTotals(bankId: number | null, from: string | null, to: string | null) {
-  const source = bankId === null ? '1 = 1' : 't.bank_id = ?'
-  const sourceBind = bankId === null ? [] : [bankId]
+  const source = bankSource(bankId)
   const gap = `MAX(0, t.amount_cents - COALESCE((SELECT SUM(p.amount_cents) FROM transaction_parts AS p WHERE p.transaction_id = t.id), 0))`
   const date = dateClause(from, to)
-  const row = database().selectObject(
+  const whereDebit = whereAnd([{ sql: "t.type = 'debit'", bind: [] }, source, date, { sql: 't.paid = 1', bind: [] }])
+  const whereCredit = whereAnd([{ sql: "t.type = 'credit'", bind: [] }, source, date, { sql: 't.paid = 1', bind: [] }])
+  const debitRow = database().selectObject(
     `
       SELECT
-        COALESCE(SUM(CASE WHEN t.type = 'debit' AND ${source} THEN ${gap} ELSE 0 END), 0) AS debit_cents,
-        COALESCE(SUM(CASE WHEN t.type = 'debit' AND ${source} AND ${gap} > 0 THEN 1 ELSE 0 END), 0) AS debit_count,
-        COALESCE(SUM(CASE WHEN t.type = 'credit' AND ${source} THEN ${gap} ELSE 0 END), 0) AS credit_cents,
-        COALESCE(SUM(CASE WHEN t.type = 'credit' AND ${source} AND ${gap} > 0 THEN 1 ELSE 0 END), 0) AS credit_count
+        COALESCE(SUM(${gap}), 0) AS debit_cents,
+        COALESCE(SUM(CASE WHEN ${gap} > 0 THEN 1 ELSE 0 END), 0) AS debit_count
       FROM transactions AS t
-      ${date.sql ? `WHERE ${date.sql}` : ''}
+      ${whereDebit.sql}
     `,
-    [...sourceBind, ...sourceBind, ...sourceBind, ...sourceBind, ...date.bind],
+    whereDebit.bind,
+  )
+  const creditRow = database().selectObject(
+    `
+      SELECT
+        COALESCE(SUM(${gap}), 0) AS credit_cents,
+        COALESCE(SUM(CASE WHEN ${gap} > 0 THEN 1 ELSE 0 END), 0) AS credit_count
+      FROM transactions AS t
+      ${whereCredit.sql}
+    `,
+    whereCredit.bind,
   )
   return {
-    unclassifiedDebitCents: metric(row?.debit_cents),
-    unclassifiedDebitCount: metric(row?.debit_count),
-    unclassifiedCreditCents: metric(row?.credit_cents),
-    unclassifiedCreditCount: metric(row?.credit_count),
+    unclassifiedDebitCents: metric(debitRow?.debit_cents),
+    unclassifiedDebitCount: metric(debitRow?.debit_count),
+    unclassifiedCreditCents: metric(creditRow?.credit_cents),
+    unclassifiedCreditCount: metric(creditRow?.credit_count),
   }
 }
 
 function debitStack(bankId: number | null, from: string | null, to: string | null, months: string[]): StackedFlow {
-  const bank = bankId === null ? { sql: '', bind: [] as SqlBind[] } : { sql: 't.bank_id = ?', bind: [bankId] as SqlBind[] }
-  const where = whereAnd([{ sql: "t.type = 'debit'", bind: [] }, bank, dateClause(from, to)])
+  const bank = bankSource(bankId)
+  const where = whereAnd([{ sql: "t.type = 'debit'", bind: [] }, bank, dateClause(from, to), { sql: 't.paid = 1', bind: [] }])
   const gap = `MAX(0, t.amount_cents - COALESCE((SELECT SUM(p.amount_cents) FROM transaction_parts AS p WHERE p.transaction_id = t.id), 0))`
   const rows = database().selectObjects(
     `
@@ -1141,7 +1361,10 @@ function pivotStack(rows: { month: string; name: string; amountCents: number }[]
 
 function bankPeriods(from: string | null, to: string | null, banks: Bank[]): BankPeriod[] {
   const date = dateClause(from, to)
-  const on = ['(t.bank_id = b.id OR t.destination_bank_id = b.id)']
+  const on = [
+    "(t.bank_id = b.id OR t.destination_bank_id = b.id OR (b.kind = 'bank' AND t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id)))",
+    't.paid = 1',
+  ]
   if (date.sql) on.push(date.sql)
   const balanceOf = new Map(banks.map((bank) => [bank.id, bank.balanceCents]))
   return database()
@@ -1150,11 +1373,22 @@ function bankPeriods(from: string | null, to: string | null, banks: Bank[]): Ban
         SELECT
           b.id AS bank_id,
           b.name AS bank_name,
-          COALESCE(SUM(CASE WHEN t.type = 'credit' AND t.bank_id = b.id THEN t.amount_cents ELSE 0 END), 0) AS credit_cents,
-          COALESCE(SUM(CASE WHEN t.type = 'debit' AND t.bank_id = b.id THEN t.amount_cents ELSE 0 END), 0) AS debit_cents,
+          b.kind AS kind,
+          parent.name AS parent_bank_name,
+          COALESCE(SUM(CASE
+            WHEN b.kind = 'card' AND t.type = 'credit' AND t.bank_id = b.id THEN t.amount_cents
+            WHEN b.kind = 'bank' AND t.type = 'credit' AND (t.bank_id = b.id OR t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id)) THEN t.amount_cents
+            ELSE 0
+          END), 0) AS credit_cents,
+          COALESCE(SUM(CASE
+            WHEN b.kind = 'card' AND t.type = 'debit' AND t.bank_id = b.id THEN t.amount_cents
+            WHEN b.kind = 'bank' AND t.type = 'debit' AND (t.bank_id = b.id OR t.bank_id IN (SELECT c.id FROM banks c WHERE c.parent_bank_id = b.id)) THEN t.amount_cents
+            ELSE 0
+          END), 0) AS debit_cents,
           COALESCE(SUM(CASE WHEN t.type = 'transfer' AND t.destination_bank_id = b.id THEN t.amount_cents ELSE 0 END), 0) AS transfer_in_cents,
           COALESCE(SUM(CASE WHEN t.type = 'transfer' AND t.bank_id = b.id THEN t.amount_cents ELSE 0 END), 0) AS transfer_out_cents
         FROM banks AS b
+        LEFT JOIN banks AS parent ON parent.id = b.parent_bank_id
         LEFT JOIN transactions AS t ON ${on.join(' AND ')}
         GROUP BY b.id
         ORDER BY b.name COLLATE NOCASE, b.id
@@ -1166,6 +1400,8 @@ function bankPeriods(from: string | null, to: string | null, banks: Bank[]): Ban
       return {
         bankId,
         bankName: text(row.bank_name),
+        kind: row.kind === 'card' ? 'card' : 'bank',
+        parentBankName: optionalText(row.parent_bank_name),
         balanceCents: balanceOf.get(bankId) ?? 0,
         creditCents: metric(row.credit_cents),
         debitCents: metric(row.debit_cents),
@@ -1177,7 +1413,7 @@ function bankPeriods(from: string | null, to: string | null, banks: Bank[]): Ban
 
 function weekdaysOf(bankId: number | null, from: string | null, to: string | null): WeekdayFlow[] {
   const sums = flowSums(bankId)
-  const where = whereAnd([bankTouch(bankId), dateClause(from, to)])
+  const where = whereAnd([bankTouch(bankId), dateClause(from, to), { sql: 't.paid = 1', bind: [] }])
   const rows = database().selectObjects(
     `
       SELECT CAST(strftime('%w', t.occurred_on) AS INTEGER) AS weekday,
@@ -1212,6 +1448,7 @@ function transferPeers(bankId: number, from: string | null, to: string | null): 
         ON other.id = CASE WHEN t.bank_id = ? THEN t.destination_bank_id ELSE t.bank_id END
       WHERE t.type = 'transfer'
         AND (t.bank_id = ? OR t.destination_bank_id = ?)
+        AND t.paid = 1
         ${date.sql ? `AND ${date.sql}` : ''}
       GROUP BY other.id, direction
       ORDER BY amount_cents DESC, bank_name COLLATE NOCASE
@@ -1303,7 +1540,10 @@ function loadDashboard(payload: unknown): DashboardSnapshot {
     largestDebit: largestMovement('debit', query.bankId, query.from, query.to),
     largestCredit: largestMovement('credit', query.bankId, query.from, query.to),
     months,
-    balanceSeries: monthKeys.length > 0 ? balanceSeries(query.bankId, openingCents, months) : [],
+    balanceSeries:
+      monthKeys.length > 0 && !(query.bankId !== null && banks.find((b) => b.id === query.bankId)?.kind === 'card')
+        ? balanceSeries(query.bankId, openingCents, months)
+        : [],
     days,
     weekdays: weekdaysOf(query.bankId, query.from, query.to),
     debitClasses: classAmounts('debit', query.bankId, query.from, query.to),
@@ -1404,6 +1644,83 @@ function saveImportRule(payload: unknown): ImportRule {
   return {
     id: asNumber(database().selectValue('SELECT last_insert_rowid()') ?? 0),
     ...saved,
+  }
+}
+
+function listImportMappings(): ImportMappingRecord[] {
+  return database()
+    .selectObjects(`
+      SELECT
+        id,
+        kind,
+        source_name,
+        target_bank_id,
+        target_class_id,
+        target_subclass_id
+      FROM import_mappings
+      ORDER BY kind, source_name COLLATE NOCASE
+    `)
+    .map((row) => ({
+      id: asNumber(row.id),
+      kind: row.kind as ImportMappingKind,
+      sourceName: text(row.source_name),
+      targetBankId: optionalNumber(row.target_bank_id),
+      targetClassId: optionalNumber(row.target_class_id),
+      targetSubclassId: optionalNumber(row.target_subclass_id),
+    }))
+}
+
+function saveImportMappings(payload: unknown): void {
+  if (!Array.isArray(payload)) throw new Error('Não foi possível salvar os mapeamentos.')
+  const db = database()
+  const stamp = now()
+  db.exec('BEGIN TRANSACTION')
+  try {
+    for (const item of payload) {
+      if (!isRecord(item) || typeof item.kind !== 'string' || typeof item.sourceName !== 'string') continue
+      const kind = item.kind
+      const sourceName = item.sourceName.trim()
+      if (!sourceName) continue
+      if (kind !== 'account' && kind !== 'card' && kind !== 'category') continue
+
+      const targetBankId =
+        typeof item.targetBankId === 'number' && Number.isInteger(item.targetBankId) && item.targetBankId > 0
+          ? item.targetBankId
+          : null
+      const targetClassId =
+        typeof item.targetClassId === 'number' && Number.isInteger(item.targetClassId) && item.targetClassId > 0
+          ? item.targetClassId
+          : null
+      const targetSubclassId =
+        typeof item.targetSubclassId === 'number' && Number.isInteger(item.targetSubclassId) && item.targetSubclassId > 0
+          ? item.targetSubclassId
+          : null
+
+      if (targetBankId === null && targetClassId === null && targetSubclassId === null) {
+        db.exec({
+          sql: 'DELETE FROM import_mappings WHERE kind = ? AND source_name = ? COLLATE NOCASE',
+          bind: [kind, sourceName],
+        })
+        continue
+      }
+
+      db.exec({
+        sql: `
+          INSERT INTO import_mappings (kind, source_name, target_bank_id, target_class_id, target_subclass_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(kind, source_name) DO UPDATE SET
+            target_bank_id = excluded.target_bank_id,
+            target_class_id = excluded.target_class_id,
+            target_subclass_id = excluded.target_subclass_id,
+            updated_at = excluded.updated_at
+        `,
+        bind: [kind, sourceName, targetBankId, targetClassId, targetSubclassId, stamp, stamp],
+      })
+    }
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
   }
 }
 
@@ -1581,6 +1898,11 @@ function dispatch(op: string, payload: unknown): unknown {
       return listImportRules(payload)
     case 'importRules.save':
       return saveImportRule(payload)
+    case 'importMappings.list':
+      return listImportMappings()
+    case 'importMappings.save':
+      saveImportMappings(payload)
+      return null
     case 'dashboard.load':
       return loadDashboard(payload)
     default:
@@ -1603,6 +1925,9 @@ function operationError(error: unknown): string {
       error.message.startsWith('Não foi possível') ||
       error.message.startsWith('Identificador') ||
       error.message.startsWith('O banco') ||
+      error.message.startsWith('O cartão') ||
+      error.message.startsWith('O tipo') ||
+      error.message.startsWith('Uma conta') ||
       error.message.startsWith('O rateio') ||
       error.message.startsWith('A soma') ||
       error.message.startsWith('Não há')
@@ -1675,6 +2000,20 @@ function openSchema(connection: Database) {
       connection.exec(migrateV6Sql)
       connection.exec({
         sql: 'INSERT INTO schema_migrations (version, applied_at) VALUES (6, ?)',
+        bind: [new Date().toISOString()],
+      })
+    }
+    if (version < 7) {
+      connection.exec(migrateV7Sql)
+      connection.exec({
+        sql: 'INSERT INTO schema_migrations (version, applied_at) VALUES (7, ?)',
+        bind: [new Date().toISOString()],
+      })
+    }
+    if (version < 8) {
+      connection.exec(migrateV8Sql)
+      connection.exec({
+        sql: 'INSERT INTO schema_migrations (version, applied_at) VALUES (8, ?)',
         bind: [new Date().toISOString()],
       })
     }

@@ -2,10 +2,27 @@ export type TransactionType = 'debit' | 'credit' | 'transfer' | 'demonstrative'
 
 export type ClassScope = 'debit' | 'credit' | 'transfer' | null
 
+export type BankKind = 'bank' | 'card'
+
 export type Bank = {
   id: number
   name: string
+  kind: BankKind
+  parentBankId: number | null
+  parentBankName: string | null
+  closingDay: number | null
+  limitCents: number | null
+  usedLimitCents: number | null
+  availableLimitCents: number | null
   balanceCents: number
+}
+
+export type BankInput = {
+  name: string
+  kind?: BankKind
+  parentBankId?: number | null
+  closingDay?: number | null
+  limitCents?: number | null
 }
 
 export type ClassRecord = {
@@ -41,6 +58,7 @@ export type TransactionInput = {
   notes: string
   amountCents: number
   occurredOn: string
+  paid?: boolean
   parts: PartInput[]
 }
 
@@ -58,6 +76,7 @@ export type TransactionRecord = {
   notes: string | null
   amountCents: number
   occurredOn: string
+  paid: boolean
   parts: PartRecord[]
 }
 
@@ -77,6 +96,7 @@ export type ImportRow = {
   notes: string
   amountCents: number
   occurredOn: string
+  paid: boolean
   parts: PartInput[]
 }
 
@@ -173,6 +193,8 @@ export type StackedFlow = {
 export type BankPeriod = {
   bankId: number
   bankName: string
+  kind: BankKind
+  parentBankName: string | null
   balanceCents: number
   creditCents: number
   debitCents: number
@@ -245,4 +267,23 @@ export type DashboardSnapshot = {
   debitTitles: TitleAmount[]
   creditTitles: TitleAmount[]
   transferPeers: TransferPeer[]
+}
+
+export type ImportMappingKind = 'account' | 'card' | 'category'
+
+export type ImportMappingRecord = {
+  id: number
+  kind: ImportMappingKind
+  sourceName: string
+  targetBankId: number | null
+  targetClassId: number | null
+  targetSubclassId: number | null
+}
+
+export type ImportMappingInput = {
+  kind: ImportMappingKind
+  sourceName: string
+  targetBankId?: number | null
+  targetClassId?: number | null
+  targetSubclassId?: number | null
 }
